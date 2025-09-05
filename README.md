@@ -46,9 +46,7 @@ A secure and robust backend API for a couples' connection app designed to help l
 ### Account Management
 - `DELETE /api/user` - Delete account with partner cleanup
 
-## 🚀 Installation
+Copyright (c) 2025 Temuulen Norovpel. All rights reserved.
 
-1. **Clone repository**
-   ```bash
-   git clone https://github.com/your-username/your-repo-name.git
-   cd your-repo-name
+This code is for educational and demonstration purposes only. 
+Unauthorized copying, modification, distribution, or use is prohibited.
