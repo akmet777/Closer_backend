@@ -4,7 +4,6 @@ const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const User = require("./models/User");
 const crypto = require("crypto");
-const nodemailer = require("nodemailer");
 const jwt = require("jsonwebtoken");
 const auth = require("./middleware");
 const Mood = require("./models/Mood");
@@ -12,6 +11,7 @@ const Question = require("./models/Question");
 const Answer = require("./models/Answer");
 const Memory = require("./models/Memory");
 const cors = require("cors");
+const axios = require("axios");
 
 // App initialization
 const app = express();
@@ -19,15 +19,12 @@ app.use(cors());
 app.use(express.json());
 
 function generateSixDigitCode() {
-  const code = Math.floor(100000 + Math.random() * 900000);
-  return code.toString(); // Return it as a string
+  return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 async function connectDB() {
   try {
-    await mongoose.connect(process.env.URI, {
-      // optional options can be added here
-    });
+    await mongoose.connect(process.env.URI);
     console.log("MongoDB connected");
   } catch (err) {
     console.error("MongoDB connection error:", err.message);
@@ -43,37 +40,44 @@ function getDayOfYear() {
   return Math.floor(diff / oneDay);
 }
 
+// ===================
+// Brevo (Sendinblue) email sender using API
+// ===================
+async function sendVerificationEmail(toEmail, verificationUrl) {
+  try {
+    const response = await axios.post(
+      "https://api.brevo.com/v3/smtp/email",
+      {
+        sender: { name: "Closer App", email: "96f3f4001@smtp-brevo.com" },
+        to: [{ email: toEmail }],
+        subject: "Verify your email for our app CLOSER",
+        htmlContent: `<p>Click the link below to verify your email:</p>
+                      <a href="${verificationUrl}">${verificationUrl}</a>`,
+      },
+      {
+        headers: {
+          "api-key": process.env.BREVO_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    console.log("Email sent:", response.data);
+    return true;
+  } catch (err) {
+    console.error("Email sending failed:", err.response?.data || err.message);
+    return false;
+  }
+}
+
+// ===================
 // Routes
+// ===================
+
 app.get("/test", (req, res) => {
   res.json({ message: "hello world" });
 });
 
-const transporter = nodemailer.createTransport({
-  host: "smtp-relay.brevo.com",
-  port: 587,
-  secure: false, // TLS is used automatically if available
-  auth: {
-    user: "96f3f4001@smtp-brevo.com", // your Brevo login
-    pass: process.env.BREVO_PASS,      // your SMTP key (set in .env)
-  },
-});
-
-// Wrapper to use async/await cleanly
-async function sendMail(mailOptions) {
-  return new Promise((resolve, reject) => {
-    transporter.sendMail(mailOptions, (err, info) => {
-      if (err) {
-        console.error("Email sending failed:", err);
-        resolve(false);
-      } else {
-        console.log("Email sent:", info.response);
-        resolve(true);
-      }
-    });
-  });
-}
-
-// Usage inside your signup route
+// Signup route
 app.post("/api/auth/signup/", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -96,23 +100,33 @@ app.post("/api/auth/signup/", async (req, res) => {
 
     const verificationUrl = `https://closer-backend.onrender.com/api/auth/verify/${emailVerifyToken}`;
 
-    const mailOptions = {
-      from: "96f3f4001@smtp-brevo.com",
-      to: email,
-      subject: "Verify your email for our app CLOSER",
-      html: `<p>Click the link below to verify your email:</p>
-             <a href="${verificationUrl}">${verificationUrl}</a>`,
-    };
-
-    const emailSent = await sendMail(mailOptions);
+    const emailSent = await sendVerificationEmail(email, verificationUrl);
 
     if (!emailSent)
       return res.status(500).json({ message: "Failed to send verification email" });
 
-    res.status(200).json({ message: "User created successfully, email sent!" });
+    return res.status(200).json({ message: "User created successfully, email sent!" });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Server error during signup" });
+    return res.status(500).json({ message: "Server error during signup" });
+  }
+});
+
+// Verify email endpoint
+app.get("/api/auth/verify/:token", async (req, res) => {
+  try {
+    const { token } = req.params;
+    const user = await User.findOne({ emailVerifyToken: token });
+    if (!user) {
+      return res.status(400).json({ message: "Invalid verification Token" });
+    }
+    user.isVerified = true;
+    user.emailVerifyToken = null;
+    await user.save();
+    return res.status(200).json({ message: "Email verified successfully!" });
+  } catch (error) {
+    console.error("Server error during verification:", error);
+    return res.status(500).json({ message: "Server error during verification" });
   }
 });
 // verify user endpoint
