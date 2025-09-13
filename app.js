@@ -77,7 +77,7 @@ app.post("/api/auth/signup/", async (req, res) => {
 
     await newUser.save();
 
-    const verificationUrl = `https://closer-backend.onrender.com//api/auth/verify/${emailVerifyToken}`;
+    const verificationUrl = `https://closer-backend.onrender.com/api/auth/verify/${emailVerifyToken}`;
 
     const mailOptions = {
       from: "norovpeltemuulen@gmail.com",
