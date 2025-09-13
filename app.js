@@ -87,7 +87,14 @@ app.post("/api/auth/signup/", async (req, res) => {
             <a href=${verificationUrl}>${verificationUrl}</a>`,
     };
 
-    await transporter.sendMail(mailOptions);
+   transporter.sendMail(mailOptions, (err, info) => {
+  if (err) {
+    console.error("Email sending failed:", err);
+  } else {
+    console.log("Verification email sent:", info.response);
+  }
+});
+
     res.status(200).json({ message: "YEAH the user is created succesfully" });
   } catch (error) {
     console.error(error);
