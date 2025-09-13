@@ -77,31 +77,34 @@ app.post("/api/auth/signup/", async (req, res) => {
 
     await newUser.save();
 
+    // Fix: removed double slash
     const verificationUrl = `https://closer-backend.onrender.com/api/auth/verify/${emailVerifyToken}`;
 
     const mailOptions = {
-      from: "norovpeltemuulen@gmail.com",
+      from: process.env.EMAIL_USER || "no-reply@closer.app",
       to: newUser.email,
       subject: "Verify your email for our app CLOSER",
       html: `<p>Please check the link below to verify your email.</p>
-            <a href=${verificationUrl}>${verificationUrl}</a>`,
+            <a href="${verificationUrl}">${verificationUrl}</a>`,
     };
 
-   transporter.sendMail(mailOptions, (err, info) => {
-  if (err) {
-    console.error("Email sending failed:", err);
-  } else {
-    console.log("Verification email sent:", info.response);
-  }
-});
+    // Send mail asynchronously (do not block response). We still log failures.
+    wrappedSendMail(mailOptions)
+      .then((info) => {
+        console.log("Verification email sent:", info && info.response ? info.response : info);
+      })
+      .catch((err) => {
+        // Log full error for debugging in Render logs
+        console.error("Email sending failed (non-blocking):", err);
+      });
 
-    res.status(200).json({ message: "YEAH the user is created succesfully" });
+    // Respond immediately — user is created regardless of email delivery
+    return res.status(200).json({ message: "User created successfully. Please check your email to verify." });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Server error during signUps" });
+    console.error("Server error during signUps:", error);
+    return res.status(500).json({ message: "Server error during signUps" });
   }
 });
-
 // verify user endpoint
 app.get("/api/auth/verify/:token", async (req, res) => {
   try {
