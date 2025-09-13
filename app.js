@@ -12,6 +12,7 @@ const Question = require("./models/Question");
 const Answer = require("./models/Answer");
 const Memory = require("./models/Memory");
 const cors = require("cors");
+
 // App initialization
 const app = express();
 app.use(cors());
@@ -24,7 +25,9 @@ function generateSixDigitCode() {
 
 async function connectDB() {
   try {
-    await mongoose.connect(process.env.URI);
+    await mongoose.connect(process.env.URI, {
+      // optional options can be added here
+    });
     console.log("MongoDB connected");
   } catch (err) {
     console.error("MongoDB connection error:", err.message);
@@ -32,13 +35,44 @@ async function connectDB() {
   }
 }
 
+/**
+ * Create a single transporter instance (reused)
+ * NOTE: For Gmail in production use an App Password (if using 2FA).
+ */
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
+  // Helpful timeouts so Render logs a failure quicker if SMTP is unresponsive
+  pool: true,
+  maxConnections: 5,
+  socketTimeout: 10000,
+  greetingTimeout: 5000,
 });
+
+/**
+ * wrappedSendMail - returns a Promise that resolves with info or rejects with error.
+ * It also supports an optional timeout (ms).
+ */
+function wrappedSendMail(mailOptions, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const done = (err, info) => {
+      if (err) return reject(err);
+      return resolve(info);
+    };
+
+    transporter.sendMail(mailOptions, done);
+
+    // Timeout guard
+    if (timeoutMs > 0) {
+      setTimeout(() => {
+        reject(new Error("sendMail timed out"));
+      }, timeoutMs);
+    }
+  });
+}
 
 function getDayOfYear() {
   const now = new Date();
@@ -105,6 +139,7 @@ app.post("/api/auth/signup/", async (req, res) => {
     return res.status(500).json({ message: "Server error during signUps" });
   }
 });
+
 // verify user endpoint
 app.get("/api/auth/verify/:token", async (req, res) => {
   try {
@@ -116,10 +151,10 @@ app.get("/api/auth/verify/:token", async (req, res) => {
     user.isVerified = true;
     user.emailVerifyToken = null;
     await user.save();
-    res.status(200).json({ message: "Email verified successfully!" });
+    return res.status(200).json({ message: "Email verified successfully!" });
   } catch (error) {
-    console.error(error);
-    res.status(200).json({ message: "Server error during verification" });
+    console.error("Server error during verification:", error);
+    return res.status(500).json({ message: "Server error during verification" });
   }
 });
 
@@ -130,9 +165,7 @@ app.post("/api/auth/login/", async (req, res) => {
       email: email,
     });
     if (!user) {
-      return res
-        .status(400)
-        .json({ message: "The email or password is wrong" });
+      return res.status(400).json({ message: "The email or password is wrong" });
     } else {
       if (user.isVerified) {
         const isPasswordValid = await bcrypt.compare(password, user.password);
@@ -140,29 +173,27 @@ app.post("/api/auth/login/", async (req, res) => {
           const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
             expiresIn: "30d",
           });
-          res.json({ message: "Login is succesful", token: token });
+          return res.json({ message: "Login is succesful", token: token });
         } else {
-          res.status(200).json({ message: "The email or password is wrong" });
+          return res.status(400).json({ message: "The email or password is wrong" });
         }
       } else {
-        res.status(200).json({
+        return res.status(403).json({
           message: "User is not verified",
         });
       }
     }
   } catch (error) {
-    console.error(error);
-    res
-      .status(200)
-      .json({ message: "Error occured on the server during login" });
+    console.error("Error occured on the server during login:", error);
+    return res.status(500).json({ message: "Error occured on the server during login" });
   }
 });
 
 app.post("/api/invite/generate", auth.authMiddleware, async (req, res) => {
   try {
-    user = await User.findOne({ _id: req.userId });
+    const user = await User.findOne({ _id: req.userId });
     if (!user) {
-      res.status(400).json({ message: "user not found" });
+      return res.status(400).json({ message: "user not found" });
     } else {
       if (!user.coupleId) {
         let inviteCode;
@@ -176,13 +207,14 @@ app.post("/api/invite/generate", auth.authMiddleware, async (req, res) => {
         }
         user.inviteCode = inviteCode;
         await user.save();
-        res.json({ inviteCode: inviteCode });
+        return res.json({ inviteCode: inviteCode });
       } else {
-        res.status(500).json({ message: "You are already in a room" });
+        return res.status(400).json({ message: "You are already in a room" });
       }
     }
   } catch (error) {
-    res.status(500).json({ message: "Server error generating code" });
+    console.error("Server error generating code:", error);
+    return res.status(500).json({ message: "Server error generating code" });
   }
 });
 
@@ -196,7 +228,7 @@ app.post("/api/invite/use/", auth.authMiddleware, async (req, res) => {
     const partnerUser = await User.findOne({ inviteCode: inviteCode });
 
     if (!partnerUser) {
-      res.status(400).json({ message: "Invalid invite code" });
+      return res.status(400).json({ message: "Invalid invite code" });
     }
     if (partnerUser._id.equals(currentUser._id)) {
       return res
@@ -223,10 +255,11 @@ app.post("/api/invite/use/", auth.authMiddleware, async (req, res) => {
         session.endSession();
         throw error;
       }
-      res.status(200).json({ message: "The room created succesfully" });
+      return res.status(200).json({ message: "The room created succesfully" });
     }
   } catch (error) {
-    res
+    console.error("server error occured while creating room:", error);
+    return res
       .status(500)
       .json({ message: "server error occured while creating room" });
   }
@@ -242,7 +275,7 @@ app.post("/api/mood/", auth.authMiddleware, async (req, res) => {
     const userId = req.userId;
     const currentUser = await User.findById(userId);
     if (!currentUser) {
-      res.status(404).json({ message: "User not found" });
+      return res.status(404).json({ message: "User not found" });
     } else {
       const updateMood = await Mood.findOneAndUpdate(
         {
@@ -260,12 +293,13 @@ app.post("/api/mood/", auth.authMiddleware, async (req, res) => {
           new: true,
         }
       );
-      res
+      return res
         .status(200)
         .json({ message: "Mood updated successfully", mood: updateMood });
     }
   } catch (error) {
-    res.status(200).json({ message: "Server error updating mood" });
+    console.error("Server error updating mood:", error);
+    return res.status(500).json({ message: "Server error updating mood" });
   }
 });
 
@@ -285,11 +319,7 @@ app.get("/api/question/today/", auth.authMiddleware, async (req, res) => {
     const dayOfYear = getDayOfYear();
     const questionIndex = dayOfYear % allQuestions.length;
     const todaysQuestion = allQuestions[questionIndex];
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const tomorrowStart = new Date(todayStart);
-    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
-    res.status(200).json({
+    return res.status(200).json({
       question: {
         id: todaysQuestion._id,
         text: todaysQuestion.text,
@@ -297,7 +327,8 @@ app.get("/api/question/today/", auth.authMiddleware, async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({
+    console.error("Server error while fetching today's question:", error);
+    return res.status(500).json({
       message: "Server error occurred while fetching today's question",
     });
   }
@@ -308,16 +339,16 @@ app.post("/api/question/answer/", auth.authMiddleware, async (req, res) => {
     const { answerText, questionId } = req.body;
     const userId = req.userId;
     if (!answerText || !questionId) {
-      res.status(400).json({ message: "Missing answer text or questionId" });
+      return res.status(400).json({ message: "Missing answer text or questionId" });
     }
 
     const currentUser = await User.findById(userId);
     if (!currentUser || !currentUser.coupleId) {
-      res.status(400), json({ message: "Must be in a couple to answer" });
+      return res.status(400).json({ message: "Must be in a couple to answer" });
     }
     const question = await Question.findById(questionId);
     if (!question || !question.isActive) {
-      res.status(400).json({ message: "Invalid question" });
+      return res.status(400).json({ message: "Invalid question" });
     }
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
@@ -336,16 +367,15 @@ app.post("/api/question/answer/", auth.authMiddleware, async (req, res) => {
           coupleId: currentUser.coupleId,
         },
       },
-
       {
         upsert: true,
         new: true,
       }
     );
-    res.status(200).json({ message: "answer saved", asnwer: answer });
+    return res.status(200).json({ message: "answer saved", answer: answer });
   } catch (error) {
-    console.error(error);
-    res
+    console.error("Server error occurred while saving answer:", error);
+    return res
       .status(500)
       .json({ message: "Server error occurred while saving answer" });
   }
@@ -356,7 +386,7 @@ app.get("/api/mood/partner/", auth.authMiddleware, async (req, res) => {
     const userId = req.userId;
     const currentUser = await User.findById(userId);
     if (!currentUser) {
-      res.status(404).json({ message: "No partner found" });
+      return res.status(404).json({ message: "No partner found" });
     }
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
@@ -369,21 +399,21 @@ app.get("/api/mood/partner/", auth.authMiddleware, async (req, res) => {
     });
 
     if (!partnerMood) {
-      res.status(404).json({ message: "Partner hasn't set a mood today" });
+      return res.status(404).json({ message: "Partner hasn't set a mood today" });
     }
-    res.json({ partnerMood: partnerMood });
+    return res.json({ partnerMood: partnerMood });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Error fetching partner's mood" });
+    console.error("Error fetching partner's mood:", error);
+    return res.status(500).json({ message: "Error fetching partner's mood" });
   }
 });
 
 app.get("/api/question/partner/", auth.authMiddleware, async (req, res) => {
   try {
     const userId = req.userId;
-    const currentUser = User.findById(userId);
+    const currentUser = await User.findById(userId);
     if (!currentUser) {
-      res.status(404).json({ message: "User not found" });
+      return res.status(404).json({ message: "User not found" });
     }
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
@@ -397,13 +427,14 @@ app.get("/api/question/partner/", auth.authMiddleware, async (req, res) => {
       },
     });
     if (!partnerAnswer) {
-      res
+      return res
         .status(404)
         .json({ message: "The partner hasn't answered a question yet" });
     }
-    res.json({ partnerAnswer: partnerAnswer });
+    return res.json({ partnerAnswer: partnerAnswer });
   } catch (error) {
-    res.status(500).json({ message: "The error occured getiing answer" });
+    console.error("The error occured getiing answer:", error);
+    return res.status(500).json({ message: "The error occured getiing answer" });
   }
 });
 
@@ -413,7 +444,7 @@ app.post("/api/memoryfeed/", auth.authMiddleware, async (req, res) => {
     const userId = req.userId;
     const currentUser = await User.findById(userId);
     if (!currentUser || !currentUser.coupleId) {
-      res.status(400).json({ message: "Must be in a couple to add memories" });
+      return res.status(400).json({ message: "Must be in a couple to add memories" });
     }
 
     // Get user's current mood color
@@ -437,13 +468,13 @@ app.post("/api/memoryfeed/", auth.authMiddleware, async (req, res) => {
 
     await newMemory.save();
 
-    res.status(201).json({
+    return res.status(201).json({
       message: "memory added to a jar",
       memory: newMemory,
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Error occured posting memory" });
+    console.error("Error occured posting memory:", error);
+    return res.status(500).json({ message: "Error occured posting memory" });
   }
 });
 
@@ -452,7 +483,7 @@ app.get("/api/memoryfeed/", auth.authMiddleware, async (req, res) => {
     const userId = req.userId;
     const currentUser = await User.findById(userId);
     if (!currentUser || !currentUser.coupleId) {
-      res.status(400).json({ message: "User is not in the couple." });
+      return res.status(400).json({ message: "User is not in the couple." });
     }
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -470,7 +501,7 @@ app.get("/api/memoryfeed/", auth.authMiddleware, async (req, res) => {
 
     const hasMore = skip + memories.length < totalMemories;
 
-    res.json({
+    return res.json({
       memories: memories,
       pagination: {
         page: page,
@@ -480,8 +511,8 @@ app.get("/api/memoryfeed/", auth.authMiddleware, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error(error);
-    res
+    console.error("Server error occured during fetching memories:", error);
+    return res
       .status(500)
       .json({ message: "Server error occured during fetching memories" });
   }
@@ -496,7 +527,8 @@ app.delete("/api/user/", auth.authMiddleware, async (req, res) => {
     const currentUser = await User.findById(userId);
     if (!currentUser) {
       await session.abortTransaction();
-      res.status(404).json({ message: "user not found" });
+      session.endSession();
+      return res.status(404).json({ message: "user not found" });
     }
     if (currentUser.partnerId) {
       const partner = await User.findById(currentUser.partnerId).session(
@@ -519,12 +551,12 @@ app.delete("/api/user/", auth.authMiddleware, async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    res.status(200).json({ message: "Account deleted successfully" });
+    return res.status(200).json({ message: "Account deleted successfully" });
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
     console.error("Account deletion error:", error);
-    res.status(500).json({ message: "Error deleting account" });
+    return res.status(500).json({ message: "Error deleting account" });
   }
 });
 
@@ -551,16 +583,18 @@ app.delete(
       //Delete the memory
       await Memory.findByIdAndDelete(memoryId);
 
-      res.status(200).json({ message: "Memory deleted successfully" });
+      return res.status(200).json({ message: "Memory deleted successfully" });
     } catch (error) {
       console.error("Memory deletion error:", error);
-      res.status(500).json({ message: "Error deleting memory" });
+      return res.status(500).json({ message: "Error deleting memory" });
     }
   }
 );
+
 // Server start
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(` Server running on port ${PORT}`);
 });
+
 connectDB();
