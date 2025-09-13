@@ -35,45 +35,6 @@ async function connectDB() {
   }
 }
 
-/**
- * Create a single transporter instance (reused)
- * NOTE: For Gmail in production use an App Password (if using 2FA).
- */
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-  // Helpful timeouts so Render logs a failure quicker if SMTP is unresponsive
-  pool: true,
-  maxConnections: 5,
-  socketTimeout: 10000,
-  greetingTimeout: 5000,
-});
-
-/**
- * wrappedSendMail - returns a Promise that resolves with info or rejects with error.
- * It also supports an optional timeout (ms).
- */
-function wrappedSendMail(mailOptions, timeoutMs = 8000) {
-  return new Promise((resolve, reject) => {
-    const done = (err, info) => {
-      if (err) return reject(err);
-      return resolve(info);
-    };
-
-    transporter.sendMail(mailOptions, done);
-
-    // Timeout guard
-    if (timeoutMs > 0) {
-      setTimeout(() => {
-        reject(new Error("sendMail timed out"));
-      }, timeoutMs);
-    }
-  });
-}
-
 function getDayOfYear() {
   const now = new Date();
   const start = new Date(now.getFullYear(), 0, 0);
@@ -87,59 +48,73 @@ app.get("/test", (req, res) => {
   res.json({ message: "hello world" });
 });
 
-// sign up
+const transporter = nodemailer.createTransport({
+  host: "smtp-relay.brevo.com",
+  port: 587,
+  secure: false, // TLS is used automatically if available
+  auth: {
+    user: "96f3f4001@smtp-brevo.com", // your Brevo login
+    pass: process.env.BREVO_PASS,      // your SMTP key (set in .env)
+  },
+});
+
+// Wrapper to use async/await cleanly
+async function sendMail(mailOptions) {
+  return new Promise((resolve, reject) => {
+    transporter.sendMail(mailOptions, (err, info) => {
+      if (err) {
+        console.error("Email sending failed:", err);
+        resolve(false);
+      } else {
+        console.log("Email sent:", info.response);
+        resolve(true);
+      }
+    });
+  });
+}
+
+// Usage inside your signup route
 app.post("/api/auth/signup/", async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const existingUser = await User.findOne({ email: email });
-
-    if (existingUser) {
+    const existingUser = await User.findOne({ email });
+    if (existingUser)
       return res.status(400).json({ message: "User already exists" });
-    }
 
     const hashedPassword = await bcrypt.hash(password, 12);
-
     const emailVerifyToken = crypto.randomBytes(32).toString("hex");
 
     const newUser = new User({
-      email: email,
+      email,
       password: hashedPassword,
-      emailVerifyToken: emailVerifyToken,
+      emailVerifyToken,
       isVerified: false,
     });
 
     await newUser.save();
 
-    // Fix: removed double slash
     const verificationUrl = `https://closer-backend.onrender.com/api/auth/verify/${emailVerifyToken}`;
 
     const mailOptions = {
-      from: process.env.EMAIL_USER || "no-reply@closer.app",
-      to: newUser.email,
+      from: "96f3f4001@smtp-brevo.com",
+      to: email,
       subject: "Verify your email for our app CLOSER",
-      html: `<p>Please check the link below to verify your email.</p>
-            <a href="${verificationUrl}">${verificationUrl}</a>`,
+      html: `<p>Click the link below to verify your email:</p>
+             <a href="${verificationUrl}">${verificationUrl}</a>`,
     };
 
-    // Send mail asynchronously (do not block response). We still log failures.
-    wrappedSendMail(mailOptions)
-      .then((info) => {
-        console.log("Verification email sent:", info && info.response ? info.response : info);
-      })
-      .catch((err) => {
-        // Log full error for debugging in Render logs
-        console.error("Email sending failed (non-blocking):", err);
-      });
+    const emailSent = await sendMail(mailOptions);
 
-    // Respond immediately — user is created regardless of email delivery
-    return res.status(200).json({ message: "User created successfully. Please check your email to verify." });
+    if (!emailSent)
+      return res.status(500).json({ message: "Failed to send verification email" });
+
+    res.status(200).json({ message: "User created successfully, email sent!" });
   } catch (error) {
-    console.error("Server error during signUps:", error);
-    return res.status(500).json({ message: "Server error during signUps" });
+    console.error(error);
+    res.status(500).json({ message: "Server error during signup" });
   }
 });
-
 // verify user endpoint
 app.get("/api/auth/verify/:token", async (req, res) => {
   try {
